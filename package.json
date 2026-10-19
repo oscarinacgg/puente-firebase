@@ -1,0 +1,13 @@
+{
+  "name": "puente-firebase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Puente (proxy) de Firebase Auth para usuarios en países donde Google bloquea Firebase",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
