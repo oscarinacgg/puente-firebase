@@ -2,9 +2,13 @@
 // Recibe las peticiones de inicio de sesión del juego y las reenvía a Google desde la IP de Render.
 // No tiene dependencias: solo usa módulos que ya trae Node.
 //
-// Rutas que acepta: /<host-de-google>/<ruta>?key=<API_KEY>
-// Ejemplo: /identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=...
-// Solo reenvía a los hosts de la lista y solo si la clave (key) es la de tu proyecto.
+// Rutas que acepta: /<host-de-google>/<ruta>
+// 1) Inicio de sesión (Firebase Auth):  ?key=<API_KEY>
+//    Ejemplo: /identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=...
+// 2) Base de datos (Realtime Database, API REST):  ?auth=<token de sesión del usuario>
+//    Ejemplo: /beep-baseball-default-rtdb.firebaseio.com/jugadores/UID/estadisticas.json?auth=...
+// Solo reenvía a los hosts de la lista. Las reglas de seguridad de tu base de datos siguen mandando:
+// el puente no abre nada que Firebase no permita ya al usuario con sesión iniciada.
 
 'use strict';
 const http = require('http');
@@ -14,6 +18,9 @@ const PORT = Number(process.env.PORT || 10000);
 // Clave pública de tu proyecto Firebase (la misma apiKey de servicios.js).
 // Se puede cambiar en Render con la variable de entorno FIREBASE_API_KEY.
 const API_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyAt_XVMLb8GofAchhn4wED3vf-N8Ke76vA';
+// Proyecto y base de datos de Firebase (cámbialos con variables de entorno en Render si hace falta)
+const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'beep-baseball';
+const DB_HOST = process.env.FIREBASE_DB_HOST || (PROJECT_ID + '-default-rtdb.firebaseio.com');
 const LIMITE_POR_MINUTO = Number(process.env.LIMITE_POR_MINUTO || 300); // por IP
 const MAX_BODY = 64 * 1024;   // 64 KB: más que suficiente para un inicio de sesión
 const TIMEOUT_MS = 25000;
@@ -22,7 +29,8 @@ const TIMEOUT_MS = 25000;
 const HOSTS = new Map([
   ['identitytoolkit.googleapis.com', null],
   ['securetoken.googleapis.com', null],
-  ['www.googleapis.com', /^\/identitytoolkit\//]
+  ['www.googleapis.com', /^\/identitytoolkit\//],
+  [DB_HOST, /\.json$/]          // base de datos: solo rutas de la API REST (terminan en .json)
 ]);
 
 // Cabeceras que NO se reenvían a Google (privacidad y limpieza)
@@ -52,9 +60,19 @@ setInterval(() => {
 
 function ponerCORS(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Expose-Headers', 'ETag');
   res.setHeader('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || '*');
   res.setHeader('Access-Control-Max-Age', '86400');
+}
+
+// El "auth" de la base de datos debe parecer un token de sesión de TU proyecto (la validación real la hace Firebase)
+function tokenDeMiProyecto(token) {
+  if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(token || '')) return false;
+  try {
+    const datos = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString('utf8'));
+    return datos.aud === PROJECT_ID;
+  } catch (e) { return false; }
 }
 
 function responder(res, codigo, texto) {
@@ -77,15 +95,20 @@ const servidor = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method !== 'GET' && req.method !== 'POST') return responder(res, 405, 'Método no permitido');
-
   const partes = url.pathname.split('/');            // ['', host, ...ruta]
   const host = partes[1] || '';
   const ruta = '/' + partes.slice(2).join('/');
   if (!HOSTS.has(host)) return responder(res, 404, 'Destino no permitido');
+  const esBaseDeDatos = (host === DB_HOST);
+  const metodosOk = esBaseDeDatos ? ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] : ['GET', 'POST'];
+  if (!metodosOk.includes(req.method)) return responder(res, 405, 'Método no permitido');
   const patron = HOSTS.get(host);
   if (patron && !patron.test(ruta)) return responder(res, 403, 'Ruta no permitida');
-  if (url.searchParams.get('key') !== API_KEY) return responder(res, 403, 'Clave no válida');
+  if (esBaseDeDatos) {
+    if (!tokenDeMiProyecto(url.searchParams.get('auth'))) return responder(res, 403, 'Sesión no válida');
+  } else if (url.searchParams.get('key') !== API_KEY) {
+    return responder(res, 403, 'Clave no válida');
+  }
   if (excedeLimite(ipDe(req))) return responder(res, 429, 'Demasiadas peticiones. Espera un minuto.');
 
   // Se lee el cuerpo completo (es pequeño) con límite de tamaño
@@ -124,7 +147,7 @@ const servidor = http.createServer((req, res) => {
       salida['cache-control'] = 'no-store';
       res.writeHead(resp.statusCode || 502, salida);
       resp.pipe(res);
-      console.log(req.method + ' ' + host + ruta + ' -> ' + resp.statusCode); // sin cuerpo ni parámetros
+      console.log(req.method + ' ' + host + (esBaseDeDatos ? '/…' : ruta) + ' -> ' + resp.statusCode); // sin cuerpo, sin parámetros y sin rutas de usuarios
     });
     destino.on('timeout', () => { destino.destroy(new Error('timeout')); });
     destino.on('error', (e) => {
