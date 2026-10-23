@@ -127,7 +127,7 @@ async function responderIce(req, res) {
   }
   if (!METERED_APP || !METERED_SECRET_KEY) {
     console.warn('Ruta /ice: faltan METERED_APP o METERED_SECRET_KEY en Render');
-    return responder(res, 502, 'no disponible');
+    return responder(res, 502, 'no disponible. Motivo: faltan variables METERED_APP o METERED_SECRET_KEY en Render');
   }
   try {
     const cred = await pedirAMetered('POST', 'credential?secretKey=' + encodeURIComponent(METERED_SECRET_KEY),
@@ -141,7 +141,7 @@ async function responderIce(req, res) {
     res.end(JSON.stringify(lista));
   } catch (e) {
     console.warn('Ruta /ice falló: ' + e.message);
-    responder(res, 502, 'no disponible');
+    responder(res, 502, 'no disponible. Motivo: ' + e.message);
   }
 }
 
