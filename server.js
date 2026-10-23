@@ -21,7 +21,7 @@ const API_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyAt_XVMLb8GofAchhn4wED3vf-
 // Proyecto y base de datos de Firebase (cámbialos con variables de entorno en Render si hace falta)
 const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'beep-baseball';
 const DB_HOST = process.env.FIREBASE_DB_HOST || (PROJECT_ID + '-default-rtdb.firebaseio.com');
-const LIMITE_POR_MINUTO = Number(process.env.LIMITE_POR_MINUTO || 300); // por IP
+const LIMITE_POR_MINUTO = Number(process.env.LIMITE_POR_MINUTO || 300); // por IP, peticiones que sí consultan a Metered
 const MAX_BODY = 64 * 1024;   // 64 KB: más que suficiente para un inicio de sesión
 const TIMEOUT_MS = 25000;
 
@@ -106,7 +106,11 @@ function pedirAMetered(metodo, ruta, cuerpo) {
       resp.setEncoding('utf8');
       resp.on('data', (t) => { texto += t; });
       resp.on('end', () => {
-        if (resp.statusCode !== 200) return rechazar(new Error('Metered respondió ' + resp.statusCode));
+        if (resp.statusCode !== 200) {
+          let detalle = '';
+          try { detalle = String(JSON.parse(texto).message || '').slice(0, 120); } catch (e) {}
+          return rechazar(new Error('Metered respondió ' + resp.statusCode + (detalle ? ': ' + detalle : '')));
+        }
         try { resolver(JSON.parse(texto)); } catch (e) { rechazar(new Error('respuesta no válida')); }
       });
     });
@@ -119,12 +123,14 @@ function pedirAMetered(metodo, ruta, cuerpo) {
 
 async function responderIce(req, res) {
   if (req.method !== 'GET') return responder(res, 405, 'Método no permitido');
-  if (excedeLimite(ipDe(req))) return responder(res, 429, 'Demasiadas peticiones. Espera un minuto.');
 
+  // Con la lista guardada no se consulta a Metered, así que no cuenta para el límite
   if (iceCache.servidores && Date.now() < iceCache.hasta) {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify(iceCache.servidores));
   }
+  // Solo las peticiones que sí van a Metered cuentan para el límite por IP
+  if (excedeLimite(ipDe(req))) return responder(res, 429, 'Demasiadas peticiones. Espera un minuto.');
   if (!METERED_APP || !METERED_SECRET_KEY) {
     console.warn('Ruta /ice: faltan METERED_APP o METERED_SECRET_KEY en Render');
     return responder(res, 502, 'no disponible. Motivo: faltan variables METERED_APP o METERED_SECRET_KEY en Render');
