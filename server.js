@@ -45,6 +45,10 @@ const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY || '';
 const ICE_CREDENCIAL_SEG = 3 * 60 * 60;   // la credencial temporal de Metered dura 3 horas
 const ICE_CACHE_MS = 60 * 60 * 1000;      // se reutiliza la misma lista durante 1 hora
 let iceCache = { servidores: null, hasta: 0 };
+// Alternativa con plan gratuito: una credencial fija creada en el panel de Metered (TURN Server).
+// Se guarda en Render como TURN_USUARIO y TURN_CLAVE. Si están, se usan en lugar de la API.
+const TURN_USUARIO = process.env.TURN_USUARIO || '';
+const TURN_CLAVE = process.env.TURN_CLAVE || '';
 
 // ---- Límite simple de peticiones por IP ----
 const contadores = new Map();
@@ -123,6 +127,19 @@ function pedirAMetered(metodo, ruta, cuerpo) {
 
 async function responderIce(req, res) {
   if (req.method !== 'GET') return responder(res, 405, 'Método no permitido');
+
+  if (TURN_USUARIO && TURN_CLAVE) {
+    const h = 'standard.relay.metered.ca';
+    const lista = [
+      { urls: 'stun:' + h + ':80' },
+      { urls: 'turn:' + h + ':80', username: TURN_USUARIO, credential: TURN_CLAVE },
+      { urls: 'turn:' + h + ':80?transport=tcp', username: TURN_USUARIO, credential: TURN_CLAVE },
+      { urls: 'turn:' + h + ':443', username: TURN_USUARIO, credential: TURN_CLAVE },
+      { urls: 'turn:' + h + ':443?transport=tcp', username: TURN_USUARIO, credential: TURN_CLAVE }
+    ];
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(lista));
+  }
 
   // Con la lista guardada no se consulta a Metered, así que no cuenta para el límite
   if (iceCache.servidores && Date.now() < iceCache.hasta) {
