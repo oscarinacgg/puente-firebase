@@ -38,6 +38,14 @@ const NO_REENVIAR = /^(host|connection|keep-alive|transfer-encoding|upgrade|te|t
 // Cabeceras de la respuesta de Google que NO se devuelven al juego
 const NO_DEVOLVER = /^(access-control-.*|alt-svc|set-cookie|connection|keep-alive|transfer-encoding|content-length)$/i;
 
+// ---- Servidores TURN (ruta /ice) ----
+// La clave secreta de Metered se lee solo aquí, de las variables de Render. Nunca se envía al juego.
+const METERED_APP = process.env.METERED_APP || '';
+const METERED_SECRET_KEY = process.env.METERED_SECRET_KEY || '';
+const ICE_CREDENCIAL_SEG = 3 * 60 * 60;   // la credencial temporal de Metered dura 3 horas
+const ICE_CACHE_MS = 60 * 60 * 1000;      // se reutiliza la misma lista durante 1 hora
+let iceCache = { servidores: null, hasta: 0 };
+
 // ---- Límite simple de peticiones por IP ----
 const contadores = new Map();
 function ipDe(req) {
@@ -80,6 +88,63 @@ function responder(res, codigo, texto) {
   res.end(JSON.stringify({ error: { code: codigo, message: texto } }));
 }
 
+// Llamada HTTPS a Metered que devuelve el JSON. No muestra la clave en los errores.
+function pedirAMetered(metodo, ruta, cuerpo) {
+  return new Promise((resolver, rechazar) => {
+    const datos = cuerpo ? Buffer.from(JSON.stringify(cuerpo)) : null;
+    const cabeceras = { 'Content-Type': 'application/json' };
+    if (datos) cabeceras['Content-Length'] = String(datos.length);
+    const peticion = https.request({
+      host: METERED_APP + '.metered.live',
+      port: 443,
+      method: metodo,
+      path: '/api/v1/turn/' + ruta,
+      headers: cabeceras,
+      timeout: 10000
+    }, (resp) => {
+      let texto = '';
+      resp.setEncoding('utf8');
+      resp.on('data', (t) => { texto += t; });
+      resp.on('end', () => {
+        if (resp.statusCode !== 200) return rechazar(new Error('Metered respondió ' + resp.statusCode));
+        try { resolver(JSON.parse(texto)); } catch (e) { rechazar(new Error('respuesta no válida')); }
+      });
+    });
+    peticion.on('timeout', () => peticion.destroy(new Error('tiempo agotado')));
+    peticion.on('error', (e) => rechazar(new Error(e.message)));
+    if (datos) peticion.write(datos);
+    peticion.end();
+  });
+}
+
+async function responderIce(req, res) {
+  if (req.method !== 'GET') return responder(res, 405, 'Método no permitido');
+  if (excedeLimite(ipDe(req))) return responder(res, 429, 'Demasiadas peticiones. Espera un minuto.');
+
+  if (iceCache.servidores && Date.now() < iceCache.hasta) {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(iceCache.servidores));
+  }
+  if (!METERED_APP || !METERED_SECRET_KEY) {
+    console.warn('Ruta /ice: faltan METERED_APP o METERED_SECRET_KEY en Render');
+    return responder(res, 502, 'no disponible');
+  }
+  try {
+    const cred = await pedirAMetered('POST', 'credential?secretKey=' + encodeURIComponent(METERED_SECRET_KEY),
+      { expiryInSeconds: ICE_CREDENCIAL_SEG, label: 'beep-baseball' });
+    if (!cred || !cred.apiKey) throw new Error('credencial sin apiKey');
+    const lista = await pedirAMetered('GET', 'credentials?apiKey=' + encodeURIComponent(cred.apiKey), null);
+    if (!Array.isArray(lista) || lista.length === 0) throw new Error('lista de servidores vacía');
+    iceCache = { servidores: lista, hasta: Date.now() + ICE_CACHE_MS };
+    console.log('Ruta /ice: ' + lista.length + ' servidores entregados');
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(lista));
+  } catch (e) {
+    console.warn('Ruta /ice falló: ' + e.message);
+    responder(res, 502, 'no disponible');
+  }
+}
+
 const servidor = http.createServer((req, res) => {
   ponerCORS(req, res);
 
@@ -94,6 +159,8 @@ const servidor = http.createServer((req, res) => {
     res.end('ok');
     return;
   }
+
+  if (url.pathname === '/ice') { responderIce(req, res); return; }
 
   const partes = url.pathname.split('/');            // ['', host, ...ruta]
   const host = partes[1] || '';
